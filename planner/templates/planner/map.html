@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fuel Route Planner</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <style>
+    :root { --bg:#fff; --fg:#1d1d1f; --muted:#6b6b70; --line:#e4e4e8; --accent:#2563eb; --stop:#d97706; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg:#16171a; --fg:#ececf0; --muted:#9a9aa3; --line:#2c2d33; --accent:#60a5fa; --stop:#f59e0b; }
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; font:14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; background:var(--bg); color:var(--fg);
+           display:grid; grid-template-columns: 360px 1fr; height:100vh; }
+    aside { overflow:auto; padding:16px; border-right:1px solid var(--line); }
+    #map { height:100vh; }
+    h1 { font-size:18px; margin:0 0 4px; }
+    .muted { color:var(--muted); }
+    .kpis { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:14px 0; }
+    .kpi { border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+    .kpi b { display:block; font-size:18px; font-variant-numeric: tabular-nums; }
+    ol { padding-left:20px; margin:0; }
+    li { padding:8px 0; border-bottom:1px solid var(--line); cursor:pointer; }
+    li .num { font-variant-numeric: tabular-nums; }
+    .err { color:#dc2626; white-space:pre-wrap; }
+    @media (max-width: 760px) { body { grid-template-columns:1fr; grid-template-rows:auto 60vh; height:auto; }
+      aside { border-right:0; border-bottom:1px solid var(--line); } #map { height:60vh; } }
+  </style>
+</head>
+<body>
+<aside>
+  {% if error %}
+    <h1>Couldn't plan this trip</h1>
+    <p class="err">{{ error }}</p>
+  {% else %}
+    <h1>{{ result.start.label }} → {{ result.finish.label }}</h1>
+    <div class="muted">{{ result.route.distance_miles }} mi · {{ result.route.duration_hours }} h driving</div>
+    <div class="kpis">
+      <div class="kpi"><span class="muted">Total fuel cost</span><b>${{ result.summary.total_fuel_cost|floatformat:2 }}</b></div>
+      <div class="kpi"><span class="muted">Fuel stops</span><b>{{ result.summary.number_of_stops }}</b></div>
+      <div class="kpi"><span class="muted">Gallons bought</span><b>{{ result.summary.gallons_purchased }}</b></div>
+      <div class="kpi"><span class="muted">Avg price paid</span><b>{% if result.summary.average_price_paid %}${{ result.summary.average_price_paid }}{% else %}—{% endif %}</b></div>
+    </div>
+    <p class="muted">Starts with {{ result.assumptions.starts_with }} · {{ result.assumptions.vehicle_range_miles|floatformat:0 }} mi range · {{ result.assumptions.miles_per_gallon|floatformat:0 }} mpg</p>
+    <ol>
+      {% for s in result.fuel_stops %}
+        <li data-stop="{{ forloop.counter0 }}">
+          <b>{{ s.station.name }}</b><br>
+          <span class="muted">{{ s.station.address }}, {{ s.station.city }}, {{ s.station.state }}</span><br>
+          <span class="num">Mile {{ s.mile_marker }} · ${{ s.price_per_gallon }}/gal · {{ s.gallons }} gal · <b>${{ s.cost|floatformat:2 }}</b></span>
+        </li>
+      {% empty %}
+        <p class="muted">No fuel needed — a full tank covers this trip.</p>
+      {% endfor %}
+    </ol>
+    <p class="muted">{{ result.summary.stations_considered }} stations within {{ result.assumptions.max_detour_miles|floatformat:0 }} mi of the route were considered.</p>
+  {% endif %}
+</aside>
+<div id="map"></div>
+{% if geojson %}{{ geojson|json_script:"trip-data" }}{% endif %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+  const map = L.map("map").setView([39.5, -98.35], 4);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 18, attribution: "&copy; OpenStreetMap contributors · Routing &copy; openrouteservice.org"
+  }).addTo(map);
+
+  const el = document.getElementById("trip-data");
+  if (el) {
+    const data = JSON.parse(el.textContent);
+    const css = getComputedStyle(document.documentElement);
+    const accent = css.getPropertyValue("--accent").trim(), stop = css.getPropertyValue("--stop").trim();
+    const stopMarkers = [];
+    const layer = L.geoJSON(data, {
+      style: () => ({ color: accent, weight: 5, opacity: 0.85 }),
+      pointToLayer: (f, latlng) => {
+        const p = f.properties;
+        if (p.kind === "fuel_stop") {
+          const m = L.circleMarker(latlng, { radius: 9, color: "#fff", weight: 2, fillColor: stop, fillOpacity: 1 })
+            .bindTooltip(String(p.stop), { permanent: true, direction: "center", className: "" })
+            .bindPopup(`<b>${p.stop}. ${p.name}</b><br>${p.city}, ${p.state}<br>$${p.price_per_gallon}/gal · ${p.gallons} gal · $${p.cost.toFixed(2)}<br>Mile ${p.mile_marker}`);
+          stopMarkers.push(m);
+          return m;
+        }
+        return L.marker(latlng).bindPopup(`<b>${p.kind === "start" ? "Start" : "Finish"}</b><br>${p.label}`);
+      }
+    }).addTo(map);
+    map.fitBounds(layer.getBounds(), { padding: [30, 30] });
+    document.querySelectorAll("li[data-stop]").forEach(li => li.addEventListener("click", () => {
+      const m = stopMarkers[+li.dataset.stop];
+      map.setView(m.getLatLng(), 10); m.openPopup();
+    }));
+  }
+</script>
+</body>
+</html>
